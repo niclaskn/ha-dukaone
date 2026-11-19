@@ -4,209 +4,132 @@ Platform for Duka One fan.
 see http://www.dingus.dk for more information
 """
 
-import asyncio
+from __future__ import annotations
+
 import logging
-import time
+from collections.abc import Callable
+from typing import Any
+
 import voluptuous as vol
-
-from homeassistant.components.fan import (
-    PLATFORM_SCHEMA,
-    FanEntityFeature,
-    FanEntity,
-)
-from homeassistant.config_entries import ConfigEntry
-from homeassistant.helpers import entity_platform
+from dukaonesdk.device import Mode, Speed
+from homeassistant.components.fan import FanEntity, FanEntityFeature
 from homeassistant.core import HomeAssistant
-from homeassistant.const import (
-    ATTR_ENTITY_ID,
-    CONF_DEVICE_ID,
-    CONF_IP_ADDRESS,
-    CONF_NAME,
-    CONF_PASSWORD,
-)
-import homeassistant.helpers.config_validation as cv
+from homeassistant.exceptions import HomeAssistantError
+from homeassistant.helpers import entity_platform
 from homeassistant.helpers.config_validation import make_entity_service_schema
+from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
-from dukaonesdk.device import Device, Mode, Speed
-
+from . import DukaConfigEntry, DukaData
 from .const import (
     ATTR_MANUAL_SPEED,
     ATTR_MODE,
+    DOMAIN,
     MODE_IN,
     MODE_INOUT,
     MODE_OUT,
     SPEED_HIGH,
+    SPEED_LOW,
     SPEED_MANUAL,
     SPEED_MEDIUM,
-    SPEED_LOW,
     SPEED_OFF,
 )
 from .dukaentity import DukaEntity
 
 _LOGGER = logging.getLogger(__name__)
 
-PLATFORM_SCHEMA = PLATFORM_SCHEMA.extend(
+VALID_MODE = vol.Any(
+    vol.All(vol.Coerce(int), vol.Range(min=0, max=2)),
+    vol.In([MODE_IN, MODE_OUT, MODE_INOUT]),
+)
+SET_MODE_SCHEMA = make_entity_service_schema({vol.Required(ATTR_MODE): VALID_MODE})
+RESET_FILTER_TIMER_SCHEMA = make_entity_service_schema({})
+SET_MANUAL_SPEED_SCHEMA = make_entity_service_schema(
     {
-        vol.Required(CONF_DEVICE_ID): cv.string,
-        vol.Optional(CONF_PASSWORD, default="1111"): cv.string,
-        vol.Optional(CONF_IP_ADDRESS, default="<broadcast>"): cv.string,
+        vol.Required(ATTR_MANUAL_SPEED): vol.All(
+            vol.Coerce(int), vol.Range(min=0, max=255)
+        )
     }
 )
 
-VALID_MODE = vol.Any(
-    vol.All(vol.Coerce(int), vol.Clamp(min=0, max=2)), cv.string)
-SET_MODE_SCHEMA = make_entity_service_schema(
-    {vol.Required(ATTR_ENTITY_ID): cv.entity_ids,
-     vol.Required(ATTR_MODE): VALID_MODE}
-)
-RESET_FILTER_TIMER_SCHEMA = make_entity_service_schema(
-    {vol.Required(ATTR_ENTITY_ID): cv.entity_ids}
-)
-SET_MANUAL_SPEED_SCHEMA = make_entity_service_schema(
-    {vol.Required(ATTR_ENTITY_ID): cv.entity_ids,
-     vol.Required(ATTR_MANUAL_SPEED): int}
-)
+PRESET_TO_SPEED = {
+    SPEED_OFF: Speed.OFF,
+    SPEED_LOW: Speed.LOW,
+    SPEED_MEDIUM: Speed.MEDIUM,
+    SPEED_HIGH: Speed.HIGH,
+    SPEED_MANUAL: Speed.MANUAL,
+}
+SPEED_TO_PRESET = {speed: preset for preset, speed in PRESET_TO_SPEED.items()}
+SPEED_TO_PERCENTAGE = {Speed.LOW: 10, Speed.MEDIUM: 35, Speed.HIGH: 70}
+
+MODE_TO_NAME = {Mode.ONEWAY: MODE_OUT, Mode.TWOWAY: MODE_INOUT, Mode.IN: MODE_IN}
+NAME_TO_MODE = {MODE_OUT: Mode.ONEWAY, MODE_INOUT: Mode.TWOWAY, MODE_IN: Mode.IN}
 
 
 async def async_setup_entry(
-    hass: HomeAssistant, entry: ConfigEntry, async_add_entities
+    hass: HomeAssistant,
+    entry: DukaConfigEntry,
+    async_add_entities: AddEntitiesCallback,
 ) -> None:
     """Set up Duka One based on a config entry."""
-
-    name = entry.data[CONF_NAME]
-    device_id = entry.data[CONF_DEVICE_ID]
-    password = entry.data[CONF_PASSWORD]
-    ip_address = entry.data[CONF_IP_ADDRESS]
-    if ip_address is None or len(ip_address) == 0:
-        ip_address = "<broadcast>"
-
-    platform = entity_platform.current_platform.get()
+    platform = entity_platform.async_get_current_platform()
+    platform.async_register_entity_service("set_mode", SET_MODE_SCHEMA, "async_set_mode")
     platform.async_register_entity_service(
-        "set_mode", SET_MODE_SCHEMA, "set_mode")
-    platform.async_register_entity_service(
-        "reset_filter_timer", RESET_FILTER_TIMER_SCHEMA, "reset_filter_timer"
+        "reset_filter_timer", RESET_FILTER_TIMER_SCHEMA, "async_reset_filter_timer"
     )
     platform.async_register_entity_service(
-        "set_manual_speed", SET_MANUAL_SPEED_SCHEMA, "set_manual_speed"
+        "set_manual_speed", SET_MANUAL_SPEED_SCHEMA, "async_set_manual_speed"
     )
-    dukaonefan = DukaOneFan(hass, name, device_id, password, ip_address)
-    await dukaonefan.wait_for_device_to_be_ready()
-    async_add_entities([dukaonefan], True)
+    async_add_entities([DukaOneFan(hass, entry)])
 
 
-class DukaOneFan(FanEntity, DukaEntity):
-    """A Duka One  fan component."""
+class DukaOneFan(DukaEntity, FanEntity):
+    """A Duka One fan."""
 
-    def __init__(self, hass: HomeAssistant, name, device_id, password, ip_address):
+    _attr_name = None
+    _attr_supported_features = (
+        FanEntityFeature.SET_SPEED
+        | FanEntityFeature.PRESET_MODE
+        | FanEntityFeature.TURN_ON
+        | FanEntityFeature.TURN_OFF
+    )
+    _attr_preset_modes = list(PRESET_TO_SPEED)
+    _attr_percentage_step = 1
+
+    def __init__(self, hass: HomeAssistant, entry: DukaConfigEntry) -> None:
         """Initialize the Duka One fan."""
-        super(DukaOneFan, self).__init__(hass, device_id)
-        self._mode: Mode = None
-        self._name = name
-        self._attr_percentage = None
-        self._supported_features = (
-            FanEntityFeature.SET_SPEED
-            | FanEntityFeature.PRESET_MODE
-            | FanEntityFeature.TURN_ON
-            | FanEntityFeature.TURN_OFF
-        )
-        self._attr_preset_mode = None
-        self._attr_preset_modes = [
-            SPEED_OFF,
-            SPEED_LOW,
-            SPEED_MEDIUM,
-            SPEED_HIGH,
-            SPEED_MANUAL,
-        ]
-        hass.async_add_executor_job(
-            self.initialize_device, password, ip_address)
-
-    async def async_will_remove_from_hass(self):
-        """Unsubscribe when removed."""
-        if self.device is not None:
-            self.the_client.remove_device(self.device.device_id)
-        self.device = None
-        return
-
-    def on_change(self, device: Device):
-        """Callback when the duka one change state"""
-        newspeed = SPEED_OFF
-        newpercentage = 0
-        if device.speed == Speed.LOW:
-            newspeed = SPEED_LOW
-            newpercentage = 10
-        elif device.speed == Speed.MEDIUM:
-            newspeed = SPEED_MEDIUM
-            newpercentage = 35
-        elif device.speed == Speed.HIGH:
-            newspeed = SPEED_HIGH
-            newpercentage = 70
-        elif device.speed == Speed.MANUAL:
-            newspeed = SPEED_MANUAL
-            if device.manualspeed is not None:
-                newpercentage = int(round(device.manualspeed * 100 / 255))
-        modeswitch = {Mode.ONEWAY: MODE_OUT,
-                      Mode.TWOWAY: MODE_INOUT, Mode.IN: MODE_IN}
-        newmode = modeswitch.get(device.mode, MODE_INOUT)
-        # Are there any changes?
-        if (
-            newspeed == self._attr_preset_mode
-            and newmode == self._mode
-            and newpercentage == self._attr_percentage
-        ):
-            _LOGGER.debug(
-                "No changes, update not needed, mode(%s), speed(%s), percentage(%s)",
-                self._mode,
-                self._attr_preset_mode,
-                self._attr_percentage,
-            )
-            return
-        self._mode = newmode
-        self._attr_percentage = newpercentage
-        self._attr_preset_mode = newspeed
-        if self.hass is not None:
-            self.schedule_update_ha_state()
-        _LOGGER.debug(
-            "Duka change, mode(%s), speed(%s), percentage(%s)",
-            self._mode,
-            self._attr_preset_mode,
-            self._attr_percentage,
-        )
-        return
+        super().__init__(entry)
+        self._data: DukaData = hass.data[DOMAIN]
+        self._attr_unique_id = self._device_id
 
     @property
-    def name(self):
-        """Return then name"""
-        return self._name
-
-    @property
-    def unique_id(self):
-        """Return a unique ID."""
-        return self._device_id
-
-    @property
-    def should_poll(self):
-        """No polling needed for a Duka One fan."""
-        return False
-
-    @property
-    def assumed_state(self):
-        """Return false  if we do optimistic updates."""
-        return False
-
-    @property
-    def is_on(self):
+    def is_on(self) -> bool:
         """Return true if device is on."""
-        return self._attr_preset_mode != SPEED_OFF
+        return self.preset_mode != SPEED_OFF
 
     @property
-    def supported_features(self) -> int:
-        """Flag supported features."""
-        return self._supported_features
+    def preset_mode(self) -> str:
+        """Return the current preset mode."""
+        return SPEED_TO_PRESET.get(self.device.speed, SPEED_OFF)
 
     @property
-    def extra_state_attributes(self):
+    def percentage(self) -> int:
+        """Return the current speed percentage."""
+        speed = self.device.speed
+        if speed in SPEED_TO_PERCENTAGE:
+            return SPEED_TO_PERCENTAGE[speed]
+        if speed == Speed.MANUAL and self.device.manualspeed is not None:
+            return int(round(self.device.manualspeed * 100 / 255))
+        return 0
+
+    @property
+    def mode(self) -> str:
+        """Return the current mode."""
+        return MODE_TO_NAME.get(self.device.mode, MODE_INOUT)
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
         """Return the state attributes."""
-        if self.device is None or not self.device.is_initialized():
+        if not self.device.is_initialized():
             return {
                 "mode": None,
                 "filter_alarm": None,
@@ -214,12 +137,12 @@ class DukaOneFan(FanEntity, DukaEntity):
                 "filter_timer_nice": None,
                 "humidity": None,
             }
-        nicetime: str = ""
+        nicetime = ""
         if self.device.filter_timer is not None:
             timeinmin: int = self.device.filter_timer
-            days: int = int(timeinmin / 60 / 24)
+            days = timeinmin // (60 * 24)
             timeinmin -= days * 60 * 24
-            hours: int = int(timeinmin / 60)
+            hours = timeinmin // 60
             timeinmin -= hours * 60
             nicetime = f"{days}d {str(hours).zfill(2)}:{str(timeinmin).zfill(2)}"
         return {
@@ -230,72 +153,54 @@ class DukaOneFan(FanEntity, DukaEntity):
             "humidity": self.device.humidity,
         }
 
-    def set_percentage(self, percentage: int) -> None:
+    async def _send(self, command: Callable[..., None], *args: Any) -> None:
+        try:
+            await self.hass.async_add_executor_job(command, self.device, *args)
+        except (OSError, TimeoutError) as err:
+            raise HomeAssistantError(
+                f"Could not send command to Duka One: {err}"
+            ) from err
+
+    async def async_set_percentage(self, percentage: int) -> None:
         """Set the speed of the fan, as a percentage."""
-        manual_speed: int = int(percentage * 255 / 100)
-        self.the_client.set_manual_speed(self.device, manual_speed)
+        await self._send(
+            self._data.client.set_manual_speed, int(percentage * 255 / 100)
+        )
 
-    @property
-    def percentage_step(self):
-        """Return the step size for percentage."""
-        return 1
-
-    def set_preset_mode(self, preset_mode: str):
+    async def async_set_preset_mode(self, preset_mode: str) -> None:
         """Set new preset mode."""
-        if preset_mode == SPEED_HIGH:
-            self.the_client.set_speed(self.device, Speed.HIGH)
-        elif preset_mode == SPEED_MEDIUM:
-            self.the_client.set_speed(self.device, Speed.MEDIUM)
-        elif preset_mode == SPEED_LOW:
-            self.the_client.set_speed(self.device, Speed.LOW)
-        elif preset_mode == SPEED_OFF:
-            self.the_client.set_speed(self.device, Speed.OFF)
-        elif preset_mode == SPEED_MANUAL:
-            self.the_client.set_speed(self.device, Speed.MANUAL)
-        self._attr_preset_mode = preset_mode
+        await self._send(self._data.client.set_speed, PRESET_TO_SPEED[preset_mode])
 
-    @property
-    def mode(self):
-        """Return the current mode"""
-        return self._mode
+    async def async_set_mode(self, mode: str | int) -> None:
+        """Set the fan mode (in, out, inout or 0, 1, 2)."""
+        if isinstance(mode, str) and mode in NAME_TO_MODE:
+            new_mode = NAME_TO_MODE[mode]
+        else:
+            new_mode = Mode(int(mode))
+        await self._send(self._data.client.set_mode, new_mode)
 
-    def set_mode(self, mode):
-        """Set the fan mode."""
-        if mode == MODE_OUT:
-            mode = 0
-        elif mode == MODE_INOUT:
-            mode = 1
-        elif mode == MODE_IN:
-            mode = 2
-        self.the_client.set_mode(self.device, mode)
-
-    # pylint: disable=arguments-differ
-    def turn_on(
+    async def async_turn_on(
         self,
-        speed: str = None,
-        **kwargs,
+        percentage: int | None = None,
+        preset_mode: str | None = None,
+        **kwargs: Any,
     ) -> None:
         """Turn on the entity."""
-        if speed is not None:
-            self.set_preset_mode(speed)
+        if preset_mode is not None:
+            await self.async_set_preset_mode(preset_mode)
+        elif percentage is not None:
+            await self.async_set_percentage(percentage)
         else:
-            self.the_client.turn_on(self.device)
+            await self._send(self._data.client.turn_on)
 
-    def turn_off(self, **kwargs) -> None:
+    async def async_turn_off(self, **kwargs: Any) -> None:
         """Turn off the entity."""
-        self.the_client.turn_off(self.device)
-        return
+        await self._send(self._data.client.turn_off)
 
-    def reset_filter_timer(self):
-        """Reset the filter timer to 90 days"""
-        self.the_client.reset_filter_alarm(self.device)
-        return
+    async def async_reset_filter_timer(self) -> None:
+        """Reset the filter timer to 90 days."""
+        await self._send(self._data.client.reset_filter_alarm)
 
-    def set_manual_speed(self, manual_speed: int):
-        """Set the manual fan speed"""
-        self.the_client.set_manual_speed(self.device, manual_speed)
-        return
-
-    @property
-    def device_info(self):
-        return self.dukaone_device_info()
+    async def async_set_manual_speed(self, manual_speed: int) -> None:
+        """Set the manual fan speed."""
+        await self._send(self._data.client.set_manual_speed, manual_speed)

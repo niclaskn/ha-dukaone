@@ -1,72 +1,88 @@
-"""
-Duka One Integration.
+"""Duka One integration.
 
 see http://www.dingus.dk for more information
 """
-import asyncio
-import logging
-import voluptuous as vol
-from homeassistant.config_entries import ConfigEntry
-from homeassistant.core import HomeAssistant
-from homeassistant.helpers.entity_component import EntityComponent
 
-from dukaonesdk.dukaclient import DukaClient, Device
+from __future__ import annotations
+
+import logging
+from functools import partial
+
+from dukaonesdk.device import Device
+from dukaonesdk.dukaclient import DukaClient
+from homeassistant.config_entries import ConfigEntry
+from homeassistant.const import CONF_DEVICE_ID, CONF_IP_ADDRESS, CONF_PASSWORD, Platform
+from homeassistant.core import HomeAssistant
+from homeassistant.exceptions import ConfigEntryNotReady
+from homeassistant.helpers.dispatcher import dispatcher_send
 
 from .const import DOMAIN
-
-from homeassistant.const import Platform 
 
 PLATFORMS = [
     Platform.FAN,
     Platform.SENSOR,
-] 
+]
 
 _LOGGER = logging.getLogger(__name__)
 
-CONFIG_SCHEMA = vol.Schema({DOMAIN: vol.Schema({})}, extra=vol.ALLOW_EXTRA)
+type DukaConfigEntry = ConfigEntry[Device]
 
 
-def setup(hass: HomeAssistant, config: dict):
-    """Set up the Duka One component."""
-
-    if DOMAIN not in hass.data:
-        hass.data[DOMAIN] = DukaEntityComponent(hass)
-    return True
+def signal_update(device_id: str) -> str:
+    """Return the dispatcher signal used to push updates for a device."""
+    return f"{DOMAIN}_update_{device_id}"
 
 
-async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
+class DukaData:
+    """Hold the shared Duka One client instance."""
+
+    def __init__(self) -> None:
+        self._client: DukaClient | None = None
+
+    @property
+    def client(self) -> DukaClient:
+        """Get the duka one client, creating it on first use."""
+        if self._client is None:
+            self._client = DukaClient()
+        return self._client
+
+
+async def async_setup_entry(hass: HomeAssistant, entry: DukaConfigEntry) -> bool:
     """Set up Duka One from a config entry."""
+    data: DukaData = hass.data.setdefault(DOMAIN, DukaData())
+    client = data.client
 
+    device_id = entry.data[CONF_DEVICE_ID]
+    password = entry.data[CONF_PASSWORD]
+    ip_address = entry.data.get(CONF_IP_ADDRESS) or "<broadcast>"
+    _LOGGER.debug("Setting up device %s at %s", device_id, ip_address)
+
+    def _on_change(_device: Device) -> None:
+        # Called from the SDK receive thread.
+        dispatcher_send(hass, signal_update(device_id))
+
+    device = await hass.async_add_executor_job(
+        partial(client.add_device, device_id, password, ip_address, _on_change)
+    )
+    if not await client.wait_for_initialize_async(device):
+        _LOGGER.debug("Device %s did not answer", device_id)
+        client.remove_device(device_id)
+        raise ConfigEntryNotReady(f"Duka One {device_id} did not respond")
+
+    entry.runtime_data = device
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     return True
 
 
-async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry):
+async def async_unload_entry(hass: HomeAssistant, entry: DukaConfigEntry) -> bool:
     """Unload a config entry."""
-    unload_ok = all(
-        await asyncio.gather(
-            *[
-                hass.config_entries.async_forward_entry_unload(entry, "fan"),
-                hass.config_entries.async_forward_entry_unload(entry, "sensor"),
-            ]
-        )
-    )
-    # if unload_ok:
-    #     hass.data[DOMAIN].pop(entry.entry_id)
-
+    unload_ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
+    if unload_ok:
+        data: DukaData = hass.data[DOMAIN]
+        client = data.client
+        client.remove_device(entry.data[CONF_DEVICE_ID])
+        if client.get_device_count() == 0:
+            _LOGGER.debug("Last device removed, closing client")
+            await hass.async_add_executor_job(client.close)
+            hass.data.pop(DOMAIN, None)
     return unload_ok
-
-
-class DukaEntityComponent(EntityComponent):
-    """We only want to have one instance of the dukaclient."""
-
-    def __init__(self, hass):
-        super(DukaEntityComponent, self).__init__(_LOGGER, DOMAIN, hass)
-        self._the_client = None
-
-    @property
-    def the_client(self) -> DukaClient:
-        """Get the duka one client."""
-        if self._the_client is None:
-            self._the_client = DukaClient()
-        return self._the_client

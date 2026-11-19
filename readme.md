@@ -4,7 +4,7 @@
 
 This is a Duka One custom component for Home Assistant.
 
-To use it, the easist way is to install it with [HACS](https://hacs.xyz). Add this repo as a Custom Repository in HACS and install it.
+To use it, the easist way is to install it with [HACS](https://hacs.xyz). Add `https://github.com/niclaskn/ha-dukaone` as a Custom Repository (type: Integration) in HACS and install it. Requires Home Assistant 2024.8.0 or newer.
 
 Without HACS you will have to place the custom_components folder in your HA configuration folder.
 
@@ -51,6 +51,12 @@ The dukaone integration provide these actions:
 * reset_filter_timer
 
 See the developer tools|Actions for parameters for each action.
+
+Inputs are validated: `set_manual_speed` only accepts 0-255 and `set_mode` only accepts `in`, `out`, `inout` (or 0, 1, 2). Anything else is rejected before it reaches the device.
+
+# Entities
+
+A fan entity and a humidity sensor (percent) are created for each device. Updates are pushed from the device, no polling.
 
 # License
 

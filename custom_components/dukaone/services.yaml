@@ -1,24 +1,34 @@
 set_mode:
-  description: Sets duka fan mode.
+  target:
+    entity:
+      integration: dukaone
+      domain: fan
   fields:
-    entity_id:
-      description: Name of the entity to set
-      example: "fan.dukaone"
     mode:
-      description: Mode in,out,inout
+      required: true
       example: "inout"
+      selector:
+        select:
+          options:
+            - "in"
+            - "out"
+            - "inout"
 reset_filter_timer:
-  description: Reset the filter timer to 90 days
-  fields:
-    entity_id:
-      description: Name of the entity to reset
-      example: "fan.dukaone"
+  target:
+    entity:
+      integration: dukaone
+      domain: fan
 set_manual_speed:
-  description: Set the fan speed manaually
+  target:
+    entity:
+      integration: dukaone
+      domain: fan
   fields:
-    entity_id:
-      description: Name of the entity to reset
-      example: "fan.dukaone"
     manual_speed:
-      description: Manual speed 0-255
+      required: true
       example: 100
+      selector:
+        number:
+          min: 0
+          max: 255
+          mode: box

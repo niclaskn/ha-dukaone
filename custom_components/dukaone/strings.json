@@ -3,6 +3,7 @@
   "config": {
     "step": {
       "user": {
+        "description": "You can find the Device Id in the Duka One mobile app.",
         "data": {
           "name": "Name",
           "device_id": "Device Id",
@@ -13,8 +14,44 @@
       }
     },
     "error": {
-      "cannot_connect": "Cannot not connect to the Duka one device",
+      "cannot_connect": "Cannot connect to the Duka One device",
       "unknown": "Unknown error"
+    },
+    "abort": {
+      "already_configured": "This device is already configured"
+    }
+  },
+  "entity": {
+    "sensor": {
+      "humidity": {
+        "name": "Humidity"
+      }
+    }
+  },
+  "services": {
+    "set_mode": {
+      "name": "Set mode",
+      "description": "Sets the ventilation mode of the Duka One.",
+      "fields": {
+        "mode": {
+          "name": "Mode",
+          "description": "Mode: in, out, inout (or 0, 1, 2)."
+        }
+      }
+    },
+    "reset_filter_timer": {
+      "name": "Reset filter timer",
+      "description": "Resets the filter timer to 90 days."
+    },
+    "set_manual_speed": {
+      "name": "Set manual speed",
+      "description": "Sets the fan speed manually.",
+      "fields": {
+        "manual_speed": {
+          "name": "Manual speed",
+          "description": "Manual speed, 0-255."
+        }
+      }
     }
   }
 }

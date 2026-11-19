@@ -1,69 +1,49 @@
-""" """
+"""Base class for Duka One entities."""
 
-import asyncio
-import logging
-import time
+from __future__ import annotations
 
 from dukaonesdk.device import Device
-from dukaonesdk.dukaclient import DukaClient
+from homeassistant.const import CONF_DEVICE_ID, CONF_NAME
+from homeassistant.core import callback
+from homeassistant.helpers.device_registry import DeviceInfo
+from homeassistant.helpers.dispatcher import async_dispatcher_connect
+from homeassistant.helpers.entity import Entity
 
-from homeassistant.core import HomeAssistant
-
-from . import DukaEntityComponent
+from . import DukaConfigEntry, signal_update
 from .const import DOMAIN
 
-_LOGGER = logging.getLogger(__name__)
 
+class DukaEntity(Entity):
+    """Base of a duka entity with a reference to a device."""
 
-class DukaEntity:
-    """Implement the base of a duka entity with a reference to a device"""
+    _attr_has_entity_name = True
+    _attr_should_poll = False
 
-    def __init__(self, hass: HomeAssistant, device_id):
-        self._device_id = device_id
-        self.device: Device = None
-        component: DukaEntityComponent = hass.data[DOMAIN]
-        self.the_client: DukaClient = component.the_client
-
-    def initialize_device(self, password: str, ip_address: str) -> None:
-        """Initialize the duka one device"""
-        self.device = self.the_client.add_device(
-            self._device_id,
-            password,
-            ip_address,
-            self.on_change,
+    def __init__(self, entry: DukaConfigEntry) -> None:
+        self.device: Device = entry.runtime_data
+        self._device_id: str = entry.data[CONF_DEVICE_ID]
+        firmware = " ".join(
+            str(part)
+            for part in (self.device.firmware_version, self.device.firmware_date)
+            if part
         )
-        _LOGGER.debug("Dukaone device added")
+        self._attr_device_info = DeviceInfo(
+            identifiers={(DOMAIN, self._device_id)},
+            name=entry.title,
+            manufacturer="Duka Ventilation",
+            model=f"Type {self.device.unit_type}",
+            sw_version=firmware or None,
+        )
 
-    async def wait_for_device_to_be_ready(self) -> bool:
-        """Wait for the device to reponse to the initial get firmware version command."""
+    async def async_added_to_hass(self) -> None:
+        """Subscribe to pushed updates."""
+        await super().async_added_to_hass()
+        self.async_on_remove(
+            async_dispatcher_connect(
+                self.hass, signal_update(self._device_id), self._handle_update
+            )
+        )
 
-        _LOGGER.debug("Waiting for dukaone device to be added.")
-        # self.device is set by the initialize_device above running async
-        # we need to wait for it. It must run async because it sends a
-        # packet to the device.
-        # The wait_for_initialize_async wait for the response
-        timeout = time.time() + 5
-        while self.device is None:
-            if time.time() > timeout:
-                _LOGGER.warning("Timeout adding dukaone device")
-                return False
-            await asyncio.sleep(0.1)
-        _LOGGER.debug("Waiting for dukaone device to reply.")
-        return await self.the_client.wait_for_initialize_async(self.device)
-
-    def on_change(self, device: Device):
-        """Callback whe dukaone has changes - must be implemented in derived class"""
-        raise NotImplementedError()
-
-    def dukaone_device_info(self):
-        """Return device information."""
-        if self.device is None:
-            return None
-        info = {
-            "name": "DukaOne",
-            "identifiers": {(DOMAIN, self._device_id)},
-            "manufacturer": "Duka Ventilation",
-            "model": f"Type {self.device.unit_type}",
-            "sw_version": f"{self.device.firmware_version} {self.device.firmware_date}",
-        }
-        return info
+    @callback
+    def _handle_update(self) -> None:
+        self.async_write_ha_state()

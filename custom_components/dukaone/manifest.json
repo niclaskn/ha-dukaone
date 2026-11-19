@@ -1,22 +1,13 @@
 {
-  "codeowners": [
-    "@dingusdk"
-  ],
-  "dependencies": [
-    "frontend",
-    "lovelace",
-    "fan"
-  ],
   "domain": "dukaone",
-  "version": "2026.09.0",
-  "homeassistant": "2024.1.0",
   "name": "Duka One",
+  "codeowners": ["@niclaskn"],
   "config_flow": true,
-  "ssdp": [],
-  "zeroconf": [],
-  "homekit": {},
-  "documentation": "https://github.com/dingusdk/ha-dukaone",
-  "requirements": [
-    "dukaonesdk==1.0.7"
-  ]
+  "dependencies": [],
+  "documentation": "https://github.com/niclaskn/ha-dukaone",
+  "iot_class": "local_push",
+  "issue_tracker": "https://github.com/niclaskn/ha-dukaone/issues",
+  "loggers": ["dukaonesdk"],
+  "requirements": ["dukaonesdk==1.0.7"],
+  "version": "2026.11.0"
 }
